@@ -1,6 +1,8 @@
 # ruview-fork
 
-Personal fork of [RuView](https://github.com/ruvnet/RuView) by rUv — WiFi-based human pose estimation using ESP32 CSI data.
+ESP32-based WiFi sensing platform that captures Channel State Information to detect human presence and motion without cameras. Extends the original with iotdash dashboard integration, multi-device MQTT discovery, and a CSI training data pipeline for pose estimation models.
+
+> Forked from [RuView](https://github.com/ruvnet/RuView) by rUv
 
 ## What's different in this fork
 
