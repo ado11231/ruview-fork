@@ -1,6 +1,6 @@
 # Project TODO
 
-> Focus: ESP32 node setup, CSI data capture, iotdash pipeline, KIMODO training pipeline.
+> Focus: ESP32 node setup, CSI data capture, iotdash pipeline, KIMODO + Chronos training pipeline.
 > Last updated: 2026-04-22
 
 ---
@@ -60,22 +60,68 @@ The README describes this pipeline but the key files **do not exist yet**.
 
 ---
 
-## 4. KIMODO Training Pipeline
+## 4. KIMODO + Chronos Training Pipeline
 
-**Goal:** Use NVIDIA KIMODO to generate synthetic 3D human motion sequences, simulate matching CSI signals, and train WiFlow to 35%+ PCK@20 (currently 2.5% without ground-truth labels).
+### Architecture Overview
 
 ```
-KIMODO (text prompt) → 3D skeleton (SOMA joints)
-    → convert: SOMA 24 joints → COCO 17 keypoints
-    → CSI simulator: 3D body position → synthetic CSI amplitudes
-    → paired dataset: { csi_window[128,20], keypoints[17,2] }
-    → WiFlow supervised training
+STAGE 1 — SYNTHETIC DATA (KIMODO, spatial prior)
+  KIMODO text prompts
+    → 3D skeleton sequences (SOMA 24 joints)
+    → convert: SOMA → COCO 17 keypoints
+    → CSI simulator (Fresnel zone / field model)
+    → synthetic pairs: { CSI[subcarriers×time], pose[17,3], gesture_label }
+
+STAGE 2 — REAL DATA (ESP32 node)
+  ESP32 UDP stream
+    → collect-training-data.py (activity-labeled)
+    → collect-ground-truth.py (CSI + webcam keypoints synced)
+    → real pairs: { CSI[subcarriers×time], camera_keypoints[17,2], gesture_label }
+
+STAGE 3 — TEMPORAL MODELING (Chronos, temporal prior)
+  CSI subcarrier amplitude time series (multivariate)
+    → Chronos fine-tuned on CSI data
+    → learns normal CSI temporal dynamics per gesture/pose
+    → outputs: anomaly score, continuity prediction, motion event flag
+
+STAGE 4 — MODEL TRAINING (combined)
+  Mixed dataset (synthetic + real, ~50/50 adjustable)
+    → CSI Encoder (CNN/Transformer): CSI[128,20] → latent[256]
+    → Pose head: latent → 17 keypoints [x,y,z] + confidence
+    → Gesture head: latent → gesture class + confidence
+    → Residual head: latent → Δ(real − simulated) correction
+    → Chronos temporal gate: flags physically implausible sequences
+    → export: model.safetensors
+
+STAGE 5 — LIVE INFERENCE
+  ESP32 CSI
+    → noise pre-filter (phase sanitizer, Hampel filter)
+    → Chronos gate: is this CSI temporally plausible? (noise rejection)
+    → Encoder → latent
+    → Residual correction applied (closes sim→real gap)
+    → Pose head → 17 keypoints + confidence
+    → Gesture head → gesture class + confidence
+    → Physics plausibility check (KIMODO prior): valid human pose?
+    → output → iotdash / sensing server API
 ```
+
+### Why both KIMODO and Chronos
+
+| Tool | Role | What it provides |
+|------|------|-----------------|
+| KIMODO | Spatial prior | Diverse realistic 3D human motions → simulated CSI at scale |
+| Chronos | Temporal prior | Models CSI time series dynamics, rejects noise, flags anomalies |
+
+KIMODO teaches the model what bodies in space look like in CSI.
+Chronos teaches the model what valid CSI signals look like over time.
+Together they cover both the spatial and temporal dimensions of noise rejection.
+
+---
 
 ### Step 1 — Install KIMODO
 - [ ] Clone `https://github.com/nv-tlabs/kimodo` (outside this repo)
-- [ ] Install dependencies — requires PyTorch + CUDA, ProtoMotions (`https://github.com/NVlabs/ProtoMotions`), Mujoco
-- [ ] Download SOMA checkpoint from HuggingFace: `nvidia/kimodo-v1` (use the human/SOMA variant, not G1 robot)
+- [ ] Install PyTorch + CUDA, ProtoMotions (`https://github.com/NVlabs/ProtoMotions`), Mujoco
+- [ ] Download SOMA checkpoint from HuggingFace: `nvidia/kimodo-v1` (human/SOMA variant)
 - [ ] Add to `.env`:
   ```
   KIMODO_CHECKPOINT_PATH=../kimodo/checkpoints/kimodo-v1-soma.pt
@@ -83,41 +129,61 @@ KIMODO (text prompt) → 3D skeleton (SOMA joints)
   KIMODO_OUTPUT_DIR=data/synthetic/kimodo
   ```
 
-### Step 2 — Generate synthetic motions
-- [ ] Write `scripts/kimodo_generate.py` — calls KIMODO Python API with text prompts and saves 3D skeleton frame sequences to `data/synthetic/kimodo/` as JSONL
-- [ ] Define motion prompts (at least 20–30):
-  - walking forward/backward, turning
-  - standing still, shifting weight
-  - sitting down, standing up
-  - raising arms, waving, reaching
-  - falling, stumbling
-  - lying down
+### Step 2 — Install Chronos
+- [ ] `pip install chronos-forecasting`
+- [ ] Start with `amazon/chronos-t5-small` (46M params) for iteration; upgrade to `chronos-t5-large` (710M) for production
+- [ ] Add to `.env`:
+  ```
+  CHRONOS_MODEL=amazon/chronos-t5-small
+  CHRONOS_DEVICE=cuda
+  ```
 
-### Step 3 — Skeleton format conversion
-- [ ] Write `scripts/kimodo_to_coco.py` — converts SOMA 24-joint output → 17 COCO keypoints (same mapping as `collect-ground-truth.py`)
-- [ ] Visual sanity check: overlay converted keypoints on a rendered frame to confirm joints land in the right places
+### Step 3 — Generate synthetic motions (KIMODO)
+- [ ] Write `scripts/kimodo_generate.py` — calls KIMODO Python API with text prompts, saves 3D skeleton sequences to `data/synthetic/kimodo/`
+- [ ] Motion prompts to cover (20–30 minimum): walking, standing, sitting, falling, waving, reaching, lying down
 
-### Step 4 — CSI simulator
-- [ ] Write `scripts/csi_simulator.py` — takes 3D keypoint positions + antenna positions + room geometry, outputs synthetic CSI amplitude matrix `[subcarriers × time]` using the Fresnel zone model
+### Step 4 — Skeleton conversion
+- [ ] Write `scripts/kimodo_to_coco.py` — SOMA 24 joints → COCO 17 keypoints (same mapping as `collect-ground-truth.py`)
+- [ ] Visual sanity check: overlay converted keypoints on a rendered frame
+
+### Step 5 — CSI simulator
+- [ ] Write `scripts/csi_simulator.py` — 3D keypoint positions + antenna positions + room geometry → synthetic CSI amplitude matrix
   - Reference: `rust-port/wifi-densepose-rs/crates/wifi-densepose-signal/src/ruvsense/field_model.rs`
   - Reference format: `v1/data/proof/sample_csi_data.json`
-- [ ] Validate: compare synthetic CSI distributions against real recordings in `data/recordings/` (check amplitude range, subcarrier variance)
+- [ ] Validate synthetic CSI distributions against real recordings in `data/recordings/`
 
-### Step 5 — Build paired dataset
-- [ ] Write `scripts/kimodo_build_dataset.py` — orchestrates steps 2–4, outputs `{ csi_window, keypoints, confidence, source: "synthetic" }` to `data/synthetic/kimodo-paired/`
-- [ ] Target: 10,000+ synthetic paired frames
-- [ ] Mix real + synthetic: combine with `data/recordings/` and `data/ground-truth/`; keep `source` field so you can ablate
+### Step 6 — Fine-tune Chronos on CSI data
+- [ ] Write `scripts/chronos_finetune.py` — fine-tune Chronos on real CSI recordings
+- [ ] Each subcarrier = one channel of a multivariate time series; gesture labels as covariates
+- [ ] Export fine-tuned weights to `data/models/chronos-csi-v1/`
 
-### Step 6 — Train WiFlow
-- [ ] Feed combined dataset into supervised training pipeline (ADR-079)
-- [ ] Add `--synthetic-weight` flag (start at 0.3–0.5 since real data is higher fidelity)
-- [ ] Evaluate PCK@20 — target ≥ 35%
-- [ ] Export to `data/models/wiflow-kimodo-v1.safetensors`
+### Step 7 — Build paired dataset
+- [ ] Write `scripts/kimodo_build_dataset.py` — KIMODO motion → CSI sim → labeled JSONL
+- [ ] Output to `data/synthetic/kimodo-paired/`, target 10,000+ frames
+- [ ] Combine with real data from `data/recordings/` + `data/ground-truth/`; keep `source` field
 
-### Dependencies (add to `requirements-train.txt`)
+### Step 8 — Train the model
+- [ ] Architecture:
+  - CSI Encoder (CNN or Transformer): `CSI[128,20]` → `latent[256]`
+  - Pose head: `latent` → `17 × [x,y,z,conf]`
+  - Gesture head: `latent` → `(gesture_class, confidence)`
+  - Residual head: `latent` → `Δ` sim-to-real correction
+  - Chronos gate: pre-filter on temporal anomaly score
+- [ ] Target: PCK@20 ≥ 35% (current baseline: 2.5%)
+- [ ] Export: `data/models/wiflow-kimodo-v1.safetensors`
+
+### Step 9 — Live inference integration
+- [ ] Wire trained model into sensing server inference path
+- [ ] Chronos gate runs first (fast) — rejects noise frames before encoder
+- [ ] Residual correction applied in encoder forward pass
+- [ ] Physics plausibility check rejects poses outside KIMODO human motion space
+- [ ] Stream results to iotdash + sensing server API
+
+### Dependencies (`requirements-train.txt`)
 ```
 torch>=2.0
 torchvision
+chronos-forecasting
 mediapipe>=0.10
 opencv-python
 numpy
@@ -129,8 +195,9 @@ scipy
 
 ## 5. Future Ideas
 
-- [ ] Multi-node CSI capture — run two ESP32-S3 nodes simultaneously for stereo/multistatic sensing
-- [ ] Fine-tune KIMODO itself on domain-specific motions (e.g. hospital/care scenarios) using BONES-SEED as base
-- [ ] Auto-label live CSI recordings using the trained WiFlow model (semi-supervised loop)
-- [ ] Publish fork-trained model to HuggingFace `ruv/ruview` alongside existing `wiflow-v1/`
-- [ ] iotdash dashboard custom widgets for CSI spectrogram and subcarrier heatmap
+- [ ] Multi-node CSI — two ESP32-S3 nodes simultaneously for stereo/multistatic sensing
+- [ ] Semi-supervised loop — auto-label live CSI using trained model, feed back into training set
+- [ ] Publish fork-trained model to HuggingFace alongside existing `wiflow-v1/`
+- [ ] iotdash custom widgets for CSI spectrogram and subcarrier heatmap
+- [ ] Fine-tune KIMODO on domain-specific motions (hospital/care/security scenarios)
+- [ ] Replace Chronos with a CSI-native foundation model once enough data is collected
