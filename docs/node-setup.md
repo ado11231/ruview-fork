@@ -1,6 +1,6 @@
 # ESP32 Node Setup Guide
 
-From a fresh ESP32-S3 to streaming CSI data in 5 steps.
+From a fresh ESP32-S3 to verified live CSI data — no prior ESP32 experience needed.
 
 ---
 
@@ -8,206 +8,353 @@ From a fresh ESP32-S3 to streaming CSI data in 5 steps.
 
 | Item | Notes |
 |------|-------|
-| ESP32-S3 board (8 MB flash) | DevKitC-1, XIAO ESP32-S3, or similar |
-| USB cable | Matches your board's USB connector |
-| CP210x driver | Windows/macOS only — [download](https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers) |
-| Docker Desktop | For building firmware |
-| Python 3.10+ | For flashing and provisioning |
+| ESP32-S3 board | 4 MB or 8 MB flash variant — see [Which binary?](#which-binary-4-mb-vs-8-mb) |
+| USB cable | Matches your board's USB port |
+| CP210x or CH340 driver | May be needed on macOS/Windows — [CP210x](https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers) / [CH340](https://www.wch-ic.com/downloads/CH341SER_EXE.html) |
+| Python 3.12 | Via pyenv (see Step 1) |
+| WiFi network | 2.4 GHz (5 GHz is not supported by the ESP32-S3 CSI driver) |
 
-Install the Python tools once:
+---
+
+## Step 1 — Install Python 3.12 via pyenv
+
+Using pyenv keeps your system Python clean and avoids version conflicts.
+
+### macOS
 
 ```bash
-pip install "esptool>=5.0" esp-idf-nvs-partition-gen
+# Install pyenv via Homebrew
+brew install pyenv
+
+# Add pyenv to your shell (add these lines to ~/.zshrc or ~/.bash_profile)
+echo 'export PYENV_ROOT="$HOME/.pyenv"' >> ~/.zshrc
+echo 'export PATH="$PYENV_ROOT/bin:$PATH"' >> ~/.zshrc
+echo 'eval "$(pyenv init -)"' >> ~/.zshrc
+source ~/.zshrc
+
+# Install Python 3.12 and set it as default
+pyenv install 3.12.7
+pyenv global 3.12.7
+
+# Verify
+python --version   # should print Python 3.12.7
+```
+
+### Windows (PowerShell)
+
+```powershell
+# Install pyenv-win
+Invoke-WebRequest -UseBasicParsing `
+  "https://raw.githubusercontent.com/pyenv-win/pyenv-win/master/pyenv-win/install-pyenv-win.ps1" `
+  -OutFile "./install-pyenv-win.ps1"
+& "./install-pyenv-win.ps1"
+
+# Restart PowerShell, then:
+pyenv install 3.12.7
+pyenv global 3.12.7
+
+# Verify
+python --version   # should print Python 3.12.7
 ```
 
 ---
 
-## Step 1 — Connect the node
+## Step 2 — Install the flashing tools
 
-Plug the ESP32-S3 into your machine via USB.
+Run once after Python is set up:
 
-Find the serial port:
+```bash
+pip install "esptool>=5.0" esp-idf-nvs-partition-gen pyserial
+```
 
-| OS | Command | Typical result |
-|----|---------|----------------|
-| macOS | `ls /dev/cu.*` | `/dev/cu.SLAB_USBtoUART` |
-| Linux | `ls /dev/ttyUSB*` | `/dev/ttyUSB0` |
-| Windows | Device Manager → Ports | `COM7` |
+Verify:
 
-Use that port value in every command below (`COM7` in the examples).
+```bash
+python -m esptool version   # should print esptool v5.x.x
+```
 
 ---
 
-## Step 2 — Build and flash the firmware
+## Step 3 — Connect the node
 
-**Build** (Docker is required — ESP-IDF does not work from Git Bash on Windows):
+Plug the ESP32-S3 into your machine via USB. Find its serial port:
 
-```bash
-# Run from the repo root
-MSYS_NO_PATHCONV=1 docker run --rm \
-  -v "$(pwd)/firmware/esp32-csi-node:/project" -w /project \
-  espressif/idf:v5.2 bash -c \
-  "rm -rf build sdkconfig && idf.py set-target esp32s3 && idf.py build"
-```
-
-Or use the Makefile shortcut:
+### macOS
 
 ```bash
-make node-build
+ls /dev/cu.usbmodem*
+# Example output: /dev/cu.usbmodem1101
 ```
 
-**Flash** (replace `COM7` with your port):
+### Windows
+
+Open **Device Manager → Ports (COM & LPT)** and look for:
+- `Silicon Labs CP210x USB to UART Bridge (COM7)` — or whatever COM number appears
+
+> The Makefile auto-detects the port on macOS. On Windows, pass `PORT=COM7` explicitly to every make command.
+
+---
+
+## Step 4 — Flash the firmware
+
+Pre-built binaries are in `firmware/esp32-csi-node/release_bins/`. No Docker or ESP-IDF needed.
+
+### macOS (auto-detects port)
 
 ```bash
-python -m esptool --chip esp32s3 --port COM7 --baud 460800 \
-  write_flash --flash_mode dio --flash_size 8MB \
-  0x0   firmware/esp32-csi-node/build/bootloader/bootloader.bin \
-  0x8000 firmware/esp32-csi-node/build/partition_table/partition-table.bin \
-  0x10000 firmware/esp32-csi-node/build/esp32-csi-node.bin
+make node-flash
 ```
 
-Or:
+### Windows
 
 ```bash
 make node-flash PORT=COM7
 ```
 
+Or run esptool directly:
+
+**4 MB board:**
+
+```bash
+python -m esptool --chip esp32s3 --port COM7 --baud 460800 \
+  write_flash --flash_mode dio --flash_size 4MB \
+  0x0     firmware/esp32-csi-node/release_bins/bootloader.bin \
+  0x8000  firmware/esp32-csi-node/release_bins/partition-table-4mb.bin \
+  0xf000  firmware/esp32-csi-node/release_bins/ota_data_initial.bin \
+  0x20000 firmware/esp32-csi-node/release_bins/esp32-csi-node-4mb.bin
+```
+
+**8 MB board:**
+
+```bash
+python -m esptool --chip esp32s3 --port COM7 --baud 460800 \
+  write_flash --flash_mode dio --flash_size 8MB \
+  0x0     firmware/esp32-csi-node/release_bins/bootloader.bin \
+  0x8000  firmware/esp32-csi-node/release_bins/partition-table.bin \
+  0xf000  firmware/esp32-csi-node/release_bins/ota_data_initial.bin \
+  0x20000 firmware/esp32-csi-node/release_bins/esp32-csi-node.bin
+```
+
+### Which binary? 4 MB vs 8 MB
+
+If you see this warning during flash, your board has 4 MB flash — use the 4 MB commands above:
+
+```
+Warning: Set flash_size 8MB is larger than the available flash size of 4MB.
+```
+
+If the warning does not appear, use the 8 MB commands.
+
+### Expected flash output
+
+```
+Hash of data verified.        ← bootloader
+Hash of data verified.        ← partition table
+Hash of data verified.        ← ota data
+Hash of data verified.        ← firmware
+Hard resetting via RTS pin...
+```
+
+All four hashes must verify. If any fail, retry — sometimes a poor USB cable causes write errors.
+
 ---
 
-## Step 3 — Provision WiFi credentials
+## Step 5 — Provision WiFi
 
-No reflash needed. The provision script writes your WiFi credentials and the sensing server IP directly to the node's flash storage.
+This writes your WiFi credentials and the IP of your machine to the node's flash. No reflash needed — you can re-run this any time to update settings.
 
-```bash
-python firmware/esp32-csi-node/provision.py \
-  --port COM7 \
-  --ssid "YourWiFiName" \
-  --password "YourWiFiPassword" \
-  --target-ip 192.168.1.20
-```
-
-`--target-ip` is **your machine's local IP** (the machine that will run the sensing server). Find it with `ipconfig` (Windows) or `ifconfig` / `ip a` (macOS/Linux).
-
-Or:
+### macOS (interactive — auto-detects port and your IP)
 
 ```bash
-make node-provision PORT=COM7 SSID="YourWiFiName" PASSWORD="yourpass" IP=192.168.1.20
+make node-setup
 ```
 
-> **Re-provisioning:** you can run this command again any time to update WiFi or target IP without reflashing firmware. Every run replaces all settings — always include `--ssid`, `--password`, and `--target-ip` together.
+Output:
+
+```
+  Device : /dev/cu.usbmodem1101
+  Host IP: 192.168.1.45
+
+  WiFi SSID: YourWiFiName
+  WiFi Password:
+```
+
+Enter your SSID and password. The node reboots and connects automatically.
+
+### Windows (manual)
+
+First find your machine's IP:
+
+```powershell
+ipconfig | findstr "IPv4"
+# Example: IPv4 Address. . . . . . . : 192.168.1.45
+```
+
+Then provision:
+
+```bash
+make node-provision PORT=COM7 SSID="YourWiFiName" PASSWORD="yourpass" IP=192.168.1.45
+```
+
+> **2.4 GHz only.** The ESP32-S3 CSI driver only works on 2.4 GHz channels. If your router broadcasts separate 2.4 GHz and 5 GHz SSIDs, use the 2.4 GHz one.
 
 ---
 
-## Step 4 — Verify the node is streaming
+## Step 6 — Verify the node is running
 
-Open the serial monitor to confirm WiFi connected and CSI is streaming:
+### Visual live dashboard (recommended)
 
 ```bash
-python -m serial.tools.miniterm COM7 115200
+# macOS
+make node-live
+
+# Windows
+make node-live PORT=COM7
 ```
 
-Or:
+You will see a live updating screen:
+
+```
+╔══ CSI Live Monitor ══════════════════════════╗
+║  Port       /dev/cu.usbmodem1101
+║  Frame #    1100
+║  Channel    11
+║  Frame len  128 bytes → 64 subcarriers
+║
+║  RSSI  -44 dBm
+║  ████████████████░░░░░░░░░░░░░░
+║
+║  Rate    22.2 fps
+║  Total   1100 frames received
+║  Dropped 0 frames
+║
+║  Health  GOOD
+╚══════════════════════════════════════════════╝
+```
+
+Press `Ctrl+C` to exit.
+
+### Plain serial monitor
 
 ```bash
+# macOS
+make node-monitor
+
+# Windows
 make node-monitor PORT=COM7
 ```
 
-Expected output:
+Expected serial lines:
 
 ```
-I (321) main: ESP32-S3 CSI Node — Node ID: 1
-I (345) main: WiFi STA initialized, connecting to: YourWiFiName
-I (1023) main: Connected to WiFi — IP: 192.168.1.45
-I (1025) main: CSI streaming active -> 192.168.1.20:5005
+I (15308) csi_collector: CSI cb #600: len=128 rssi=-44 ch=11
+I (16948) csi_collector: CSI cb #700: len=128 rssi=-45 ch=11
 ```
 
-Press `Ctrl+]` to exit the monitor.
-
-**Common issues:**
+**Troubleshooting:**
 
 | Symptom | Fix |
 |---------|-----|
-| No output at all | Wrong baud rate — use `115200` |
-| `Connecting to WiFi...` repeats | Wrong SSID or password — re-run provision |
-| Connected but no CSI frames received later | Firewall blocking UDP 5005 (see Step 5) |
+| `Retrying WiFi connection...` repeats | Wrong SSID/password — re-run Step 5 |
+| No CSI lines appear after WiFi connects | Check firewall is not blocking UDP 5005 |
+| `boot: No bootable app partitions` | Wrong partition table flashed — re-run Step 4 with correct 4 MB / 8 MB commands |
+| Node crashes immediately and reboots | Flash size mismatch — check which binary you used |
 
 ---
 
-## Step 5 — Observe CSI packets
+## Step 7 — Validate data accuracy
 
-On the machine running the sensing server, open a terminal and run:
-
-```bash
-python scripts/record-csi-udp.py --port 5005 --duration 60
-```
-
-Or:
+Run this in a second terminal while the node is streaming:
 
 ```bash
-make node-observe
+make node-validate
 ```
 
-You should see live output like:
+It listens on UDP for 5 seconds and prints a full health report:
 
 ```
-Listening on UDP :5005 for 60s...
-  500 frames | 20 fps | nodes: [1] | 25s / 60s
-  1000 frames | 20 fps | nodes: [1] | 50s / 60s
+══ CSI Accuracy Report ═══════════════════════════════
 
-=== CSI Recording Complete ===
-  Frames: 1200
-  Duration: 60s
-  Rate: 20 fps
-  Nodes: [1]
-  Output: data/recordings/session-1234567890.csi.jsonl
+  Basic reception
+  [PASS]  UDP packets received         111 frames in 5s (22.2 fps)
+  [PASS]  Frame rate > 20 fps
+  [PASS]  Single channel (no drift)    channels seen: [11]
+
+  IQ data integrity
+  [PASS]  Amplitudes non-zero          mean amplitude = 11.50
+  [PASS]  Not all identical values     range: 0.0 – 121.0
+  [PASS]  Subcarrier variance > 0      mean variance = 0.996
+  [PASS]  Values physically plausible  mean = 11.50 (expect 5–60)
+
+  Signal quality
+  [PASS]  RSSI in normal range         mean RSSI = -45.3 dBm
+  [PASS]  RSSI stable (static room)    RSSI variance = 0.8
+
+  Last frame — subcarrier amplitudes (64 subcarriers)
+   ▁▂▄▅▅▆▆▆▆▅▅▄▃▁  ▁▂▃▄▅▅▅▅▄▄
 ```
 
-If you see `0 frames`, check:
-1. Node serial output confirms `CSI streaming active`
-2. The `--target-ip` you provisioned matches this machine's IP
-3. UDP port 5005 is not blocked by a firewall
+All items should show `PASS`. A smooth sparkline (not flat) confirms real IQ data.
 
-**Windows firewall rule:**
+**If `node-validate` receives 0 frames:**
 
-```powershell
+1. Check `make node-live` shows frames arriving — confirms the node is streaming
+2. Your machine's IP in provisioning must exactly match the IP shown by `ifconfig` / `ipconfig`
+3. Allow UDP port 5005 through your firewall:
+
+```bash
+# macOS — allow inbound UDP 5005
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add $(which python3)
+
+# Windows PowerShell (run as Administrator)
 netsh advfirewall firewall add rule name="ESP32 CSI" dir=in action=allow protocol=UDP localport=5005
 ```
 
 ---
 
+## Quick reference — all node commands
+
+| Command | macOS | Windows |
+|---------|-------|---------|
+| Flash firmware | `make node-flash` | `make node-flash PORT=COM7` |
+| Provision WiFi (interactive) | `make node-setup` | *(use node-provision below)* |
+| Provision WiFi (manual) | `make node-provision SSID="x" PASSWORD="y" IP=z` | same + `PORT=COM7` |
+| Visual live dashboard | `make node-live` | `make node-live PORT=COM7` |
+| Plain serial monitor | `make node-monitor` | `make node-monitor PORT=COM7` |
+| Validate data accuracy | `make node-validate` | `make node-validate` |
+| Record CSI to disk | `make node-observe` | `make node-observe` |
+
+---
+
 ## Multi-node setup
 
-Each additional node needs its own `--node-id` so packets can be distinguished:
+Each node needs a unique `--node-id`. Plug in one node at a time and provision each:
 
 ```bash
-# Node 1 (already provisioned above, node_id defaults to 1)
-
-# Node 2
+# Node 2 (macOS — change port for Windows)
 python firmware/esp32-csi-node/provision.py \
-  --port COM8 \
-  --ssid "YourWiFiName" --password "YourWiFiPassword" \
-  --target-ip 192.168.1.20 \
+  --port /dev/cu.usbmodem1101 \
+  --ssid "YourWiFiName" --password "yourpass" \
+  --target-ip 192.168.1.45 \
   --node-id 2
 
 # Node 3
 python firmware/esp32-csi-node/provision.py \
-  --port COM9 \
-  --ssid "YourWiFiName" --password "YourWiFiPassword" \
-  --target-ip 192.168.1.20 \
+  --port /dev/cu.usbmodem1101 \
+  --ssid "YourWiFiName" --password "yourpass" \
+  --target-ip 192.168.1.45 \
   --node-id 3
 ```
 
-All nodes send to the same UDP port. The `node_id` field in each packet identifies which node it came from.
+All nodes send to the same UDP port 5005. The `node_id` field in each packet tells them apart.
 
 ---
 
 ## Next steps
 
-Once you have frames flowing, the foundation is set for:
+Once all checks pass:
 
-- **Noise reduction** — signal conditioning and subcarrier filtering (`docs/signal-conditioning.md`)
-- **Data collection** — labeled recording sessions for training (`scripts/collect-training-data.py`)
-- **Live visualization** — start the sensing server and open the UI (`make run-sensing-server`)
-- **Vynth pipeline** — streaming CSI to the Vynth dashboard (`docs/vynth-pipeline.md`)
-
-For advanced firmware configuration (edge processing tiers, channel hopping, TDM mesh), see the full [firmware reference](../firmware/esp32-csi-node/README.md).
+- **Record a session** — `make node-observe` saves raw CSI to `data/recordings/`
+- **Live visualization** — `make run-sensing-server` then open the UI
+- **Pose pipeline** — pipe recordings into the Python inference stack (`v1/`)
+- **Add more nodes** — 3–6 nodes give full-room 3D coverage

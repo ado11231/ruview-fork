@@ -17,19 +17,32 @@ import struct
 import time
 
 
+HEADER_SIZE = 20           # CSI_HEADER_SIZE from csi_collector.h
+CSI_MAGIC   = 0xC5110001   # ADR-018 magic number
+
 def parse_csi_packet(data):
-    """Parse ADR-018 binary CSI packet into dict."""
-    if len(data) < 8:
+    """Parse firmware CSI packet (csi_collector.c header layout)."""
+    if len(data) < HEADER_SIZE + 2:
         return None
+    magic = struct.unpack_from('<I', data, 0)[0]
+    if magic != CSI_MAGIC:
+        return None  # not from our ESP32
 
-    # ADR-018 header: [magic(2), len(2), node_id(1), seq(1), rssi(1), channel(1), iq_data...]
-    # Simplified: extract what we can from the raw packet
-    node_id = data[4] if len(data) > 4 else 0
-    rssi = struct.unpack('b', bytes([data[6]]))[0] if len(data) > 6 else 0
-    channel = data[7] if len(data) > 7 else 0
+    node_id      = data[4]
+    n_subcarriers = struct.unpack_from('<H', data, 6)[0]
+    freq_mhz     = struct.unpack_from('<I', data, 8)[0]
+    seq          = struct.unpack_from('<I', data, 12)[0]
+    rssi         = struct.unpack_from('b',  data, 16)[0]
 
-    # IQ data starts at offset 8
-    iq_data = data[8:] if len(data) > 8 else b''
+    if not (2400 <= freq_mhz <= 2500 or 4900 <= freq_mhz <= 6100):
+        return None  # invalid frequency
+    if 2412 <= freq_mhz <= 2484:
+        channel = (freq_mhz - 2412) // 5 + 1
+    else:
+        channel = (freq_mhz - 5000) // 5
+
+    # IQ data starts at offset HEADER_SIZE
+    iq_data = data[HEADER_SIZE:]
     n_subcarriers = len(iq_data) // 2  # I,Q pairs
 
     # Compute amplitudes
@@ -44,8 +57,10 @@ def parse_csi_packet(data):
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}Z",
         "ts_ns": time.time_ns(),
         "node_id": node_id,
+        "seq": seq,
         "rssi": rssi,
         "channel": channel,
+        "freq_mhz": freq_mhz,
         "subcarriers": n_subcarriers,
         "amplitudes": amplitudes,
         "iq_hex": iq_data.hex(),

@@ -4,9 +4,14 @@
 .PHONY: verify verify-verbose verify-audit install install-verify install-python \
         install-rust install-browser install-docker install-field install-full \
         check build-rust build-wasm test-rust bench run-api run-viz clean help \
-        node-build node-flash node-provision node-monitor node-observe
+        node-build node-flash node-provision node-monitor node-observe node-setup node-live node-validate
 
 # ─── ESP32 Node ──────────────────────────────────────────────
+# Auto-detect helpers
+DETECTED_PORT := $(shell ls /dev/cu.usbmodem* 2>/dev/null | head -1)
+DETECTED_IP   := $(shell ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null)
+PORT          ?= $(DETECTED_PORT)
+
 # Build firmware inside ESP-IDF Docker container (required on all platforms)
 node-build:
 	MSYS_NO_PATHCONV=1 docker run --rm \
@@ -14,22 +19,49 @@ node-build:
 	  espressif/idf:v5.2 bash -c \
 	  "rm -rf build sdkconfig && idf.py set-target esp32s3 && idf.py build"
 
-# Flash firmware  — usage: make node-flash PORT=COM7
+# Flash firmware — usage: make node-flash  (auto-detects port)
 node-flash:
 	python -m esptool --chip esp32s3 --port $(PORT) --baud 460800 \
-	  write_flash --flash_mode dio --flash_size 8MB \
-	  0x0    firmware/esp32-csi-node/build/bootloader/bootloader.bin \
-	  0x8000 firmware/esp32-csi-node/build/partition_table/partition-table.bin \
-	  0x10000 firmware/esp32-csi-node/build/esp32-csi-node.bin
+	  write_flash --flash_mode dio --flash_size 4MB \
+	  0x0     firmware/esp32-csi-node/release_bins/bootloader.bin \
+	  0x8000  firmware/esp32-csi-node/release_bins/partition-table-4mb.bin \
+	  0xf000  firmware/esp32-csi-node/release_bins/ota_data_initial.bin \
+	  0x20000 firmware/esp32-csi-node/release_bins/esp32-csi-node-4mb.bin
 
-# Provision WiFi — usage: make node-provision PORT=COM7 SSID="MyWifi" PASSWORD="secret" IP=192.168.1.20
+# Interactive setup — auto-detects port + IP, prompts for WiFi only
+node-setup:
+	@bash -c ' \
+	  PORT=$(DETECTED_PORT); \
+	  IP=$(DETECTED_IP); \
+	  if [ -z "$$PORT" ]; then echo "ERROR: No ESP32 found on USB"; exit 1; fi; \
+	  if [ -z "$$IP" ]; then echo "ERROR: Could not detect local IP"; exit 1; fi; \
+	  echo ""; \
+	  echo "  Device : $$PORT"; \
+	  echo "  Host IP: $$IP"; \
+	  echo ""; \
+	  read -p "  WiFi SSID: " SSID; \
+	  read -s -p "  WiFi Password: " PASS; echo ""; \
+	  echo ""; \
+	  python firmware/esp32-csi-node/provision.py \
+	    --port $$PORT --ssid "$$SSID" --password "$$PASS" --target-ip $$IP \
+	'
+
+# Provision WiFi — manual usage: make node-provision SSID="MyWifi" PASSWORD="secret"
 node-provision:
 	python firmware/esp32-csi-node/provision.py \
-	  --port $(PORT) --ssid "$(SSID)" --password "$(PASSWORD)" --target-ip $(IP)
+	  --port $(PORT) --ssid "$(SSID)" --password "$(PASSWORD)" --target-ip $(DETECTED_IP)
 
-# Open serial monitor — usage: make node-monitor PORT=COM7
+# Open serial monitor — auto-detects port
 node-monitor:
 	python -m serial.tools.miniterm $(PORT) 115200
+
+# Live visual dashboard — shows RSSI bar, frame rate, health
+node-live:
+	python scripts/monitor-live.py $(PORT)
+
+# Validate CSI data accuracy — 5 second UDP capture + health report
+node-validate:
+	python scripts/validate-csi.py
 
 # Listen for live CSI packets on UDP 5005 (Ctrl+C to stop)
 node-observe:
