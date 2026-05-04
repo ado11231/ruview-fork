@@ -1,3 +1,6 @@
+# macOS metadata
+.DS_Store
+
 # Local Claude config (contains WiFi credentials and machine-specific paths)
 CLAUDE.local.md
 
