@@ -3,7 +3,37 @@
 
 .PHONY: verify verify-verbose verify-audit install install-verify install-python \
         install-rust install-browser install-docker install-field install-full \
-        check build-rust build-wasm test-rust bench run-api run-viz clean help
+        check build-rust build-wasm test-rust bench run-api run-viz clean help \
+        node-build node-flash node-provision node-monitor node-observe
+
+# ─── ESP32 Node ──────────────────────────────────────────────
+# Build firmware inside ESP-IDF Docker container (required on all platforms)
+node-build:
+	MSYS_NO_PATHCONV=1 docker run --rm \
+	  -v "$(shell pwd)/firmware/esp32-csi-node:/project" -w /project \
+	  espressif/idf:v5.2 bash -c \
+	  "rm -rf build sdkconfig && idf.py set-target esp32s3 && idf.py build"
+
+# Flash firmware  — usage: make node-flash PORT=COM7
+node-flash:
+	python -m esptool --chip esp32s3 --port $(PORT) --baud 460800 \
+	  write_flash --flash_mode dio --flash_size 8MB \
+	  0x0    firmware/esp32-csi-node/build/bootloader/bootloader.bin \
+	  0x8000 firmware/esp32-csi-node/build/partition_table/partition-table.bin \
+	  0x10000 firmware/esp32-csi-node/build/esp32-csi-node.bin
+
+# Provision WiFi — usage: make node-provision PORT=COM7 SSID="MyWifi" PASSWORD="secret" IP=192.168.1.20
+node-provision:
+	python firmware/esp32-csi-node/provision.py \
+	  --port $(PORT) --ssid "$(SSID)" --password "$(PASSWORD)" --target-ip $(IP)
+
+# Open serial monitor — usage: make node-monitor PORT=COM7
+node-monitor:
+	python -m serial.tools.miniterm $(PORT) 115200
+
+# Listen for live CSI packets on UDP 5005 (Ctrl+C to stop)
+node-observe:
+	python scripts/record-csi-udp.py --port 5005 --duration 3600 --output data/recordings
 
 # ─── Installation ────────────────────────────────────────────
 # Guided interactive installer
@@ -87,6 +117,15 @@ clean:
 help:
 	@echo "WiFi-DensePose Build Targets"
 	@echo "============================================================"
+	@echo ""
+	@echo "  ESP32 Node (see docs/node-setup.md):"
+	@echo "    make node-build                    Build firmware (Docker)"
+	@echo "    make node-flash PORT=COM7          Flash firmware to device"
+	@echo "    make node-provision PORT=COM7 \\"
+	@echo "      SSID=MyWifi PASSWORD=secret \\"
+	@echo "      IP=192.168.1.20                  Write WiFi credentials (no reflash)"
+	@echo "    make node-monitor PORT=COM7        Open serial monitor"
+	@echo "    make node-observe                  Listen for live CSI packets"
 	@echo ""
 	@echo "  Installation:"
 	@echo "    make install          Interactive guided installer"

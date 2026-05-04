@@ -23,50 +23,25 @@ This firmware captures WiFi Channel State Information (CSI) from an ESP32-S3 and
 
 ## Quick Start
 
-For users who want to get running fast. Detailed explanations follow in later sections.
+**New to this?** See the [Node Setup Guide](../../docs/node-setup.md) for a step-by-step walkthrough — connect, build, flash, provision, and observe CSI packets.
 
-### 1. Build (Docker -- the only reliable method)
-
-```bash
-# From the repository root:
-MSYS_NO_PATHCONV=1 docker run --rm \
-  -v "$(pwd)/firmware/esp32-csi-node:/project" -w /project \
-  espressif/idf:v5.2 bash -c \
-  "rm -rf build sdkconfig && idf.py set-target esp32s3 && idf.py build"
-```
-
-### 2. Flash
+**Short version** (assumes prerequisites installed):
 
 ```bash
-python -m esptool --chip esp32s3 --port COM7 --baud 460800 \
-  write_flash --flash_mode dio --flash_size 8MB \
-  0x0 firmware/esp32-csi-node/build/bootloader/bootloader.bin \
-  0x8000 firmware/esp32-csi-node/build/partition_table/partition-table.bin \
-  0x10000 firmware/esp32-csi-node/build/esp32-csi-node.bin
-```
+# 1. Build
+make node-build
 
-### 3. Provision WiFi credentials (no reflash needed)
+# 2. Flash
+make node-flash PORT=COM7
 
-```bash
-python scripts/provision.py --port COM7 \
-  --ssid "YourSSID" --password "YourPass" --target-ip 192.168.1.20
-```
+# 3. Provision WiFi
+make node-provision PORT=COM7 SSID="YourSSID" PASSWORD="YourPass" IP=192.168.1.20
 
-### 4. Start the sensing server
+# 4. Verify — watch for "CSI streaming active"
+make node-monitor PORT=COM7
 
-```bash
-cargo run -p wifi-densepose-sensing-server -- --http-port 3000 --source auto
-```
-
-### 5. Open the UI
-
-Navigate to [http://localhost:3000](http://localhost:3000) in your browser.
-
-### 6. (Optional) Upload a WASM sensing module
-
-```bash
-curl -X POST http://<ESP32_IP>:8032/wasm/upload --data-binary @gesture.rvf
-curl http://<ESP32_IP>:8032/wasm/list
+# 5. Observe packets
+make node-observe
 ```
 
 ---
@@ -734,17 +709,9 @@ Fuzz targets:
 | `rvf_parser.c` | Malformed RVF packets | Parse rejection, no crash |
 | `wasm_upload.c` | Corrupt WASM blobs | Rejection without crash |
 
-### QEMU CI Workflow
+### QEMU CI
 
-The GitHub Actions workflow (`.github/workflows/firmware-qemu.yml`) runs on every push or PR touching `firmware/**`:
-
-1. Uses the `espressif/idf:v5.4` container image
-2. Builds Espressif's QEMU fork from source
-3. Runs a CI matrix across NVS configurations: `default`, `nvs-full`, `nvs-edge-tier0`, `nvs-tdm-3node`
-4. For each config: provisions NVS, builds with mock CSI, runs in QEMU with timeout, validates UART output
-5. Uploads QEMU logs as build artifacts for debugging failures
-
-No physical ESP32 hardware is needed in CI.
+QEMU testing can be run locally using the commands above. No CI workflow is configured for QEMU in this fork.
 
 ---
 
